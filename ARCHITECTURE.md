@@ -66,7 +66,7 @@ Assets/
 │   │   ├── Core/
 │   │   │   ├── GameManager.cs       # Singleton entry point; owns StateMachine + references
 │   │   │   ├── GameStateMachine.cs  # Drives game phase transitions
-│   │   │   ├── GameState.cs         # Enum: MainMenu, PlayerTurn, Animating, GameOver
+│   │   │   ├── GameState.cs         # Enum: MainMenu, PlayerTurn, AIThinking, Animating, GameOver
 │   │   │   ├── TurnManager.cs       # Tracks active player, turn number, begins/ends turns
 │   │   │   └── GameEvents.cs        # Static event bus (OnUnitMoved, OnTileSelected, etc.)
 │   │   │
@@ -93,7 +93,7 @@ Assets/
 │   │   │   └── CaptureSystem.cs     # Handles capture-property action; checks win via HQ capture
 │   │   │
 │   │   ├── Input/
-│   │   │   ├── InputRouter.cs       # Listens to InputAction (pointer click/tap); converts to world pos → tile; disabled by GameStateMachine during Animating and GameOver
+│   │   │   ├── InputRouter.cs       # Listens to InputAction (pointer click/tap); converts to world pos → tile; disabled by GameStateMachine during Animating, AIThinking, and GameOver
 │   │   │   └── SelectionStateMachine.cs  # Idle → UnitSelected → MoveTarget → AttackTarget
 │   │   │
 │   │   ├── UI/
@@ -104,8 +104,18 @@ Assets/
 │   │   │   ├── TurnBanner.cs        # "Player 1 Turn" overlay between turns
 │   │   │   └── HealthBar.cs         # Per-unit world-space HP bar: smooth fill + numeric readout (1–100)
 │   │   │
-│   │   └── AI/                      # Post-MVP stub
-│   │       └── AIController.cs      # Interface; NullAI (hotseat) and SimpleAI (greedy) implementations
+│   │   └── AI/
+│   │       ├── IAIController.cs             # Interface: Task TakeTurn(GameContext) — async from day one
+│   │       ├── NullAI.cs                    # No-op for hotseat; completes immediately
+│   │       ├── HeuristicAI.cs               # Greedy scorer (post-MVP)
+│   │       ├── LlmAI.cs                     # Orchestrates WorldView → LLM call → ActionParser, unit-by-unit
+│   │       ├── WorldView/
+│   │       │   ├── WorldStateSerializer.cs  # Snapshots game state to prompt string (ASCII map + stat block)
+│   │       │   ├── ActionEnumerator.cs      # Enumerates all legal moves for a player as typed option structs
+│   │       │   └── ActionParser.cs          # Converts LLM tool-call response → IGameAction[]
+│   │       └── Llm/
+│   │           ├── ILlmClient.cs            # Interface: Task<string> Complete(string prompt, ToolDef[])
+│   │           └── AnthropicClient.cs       # Claude API implementation
 │   │
 │   ├── ScriptableObjects/
 │   │   ├── Units/
@@ -176,6 +186,7 @@ Boot
            │    ├─► ActionMenu      (Move/Attack/Capture/Wait popup)
            │    ├─► AttackTarget    (show attack range, wait for target tap)
            │    └─► Animating       (unit moves/attacks; lock input)
+           ├─► AIThinking           (LLM/heuristic AI turn; input locked, "Thinking…" overlay shown)
            └─► GameOver
 ```
 
@@ -189,7 +200,7 @@ Uses a single `InputAction` of type `Value<Vector2>` (pointer position) plus a `
 2. Raise `GameEvents.OnTilePointed(gridPos)`
 3. `SelectionStateMachine` reacts based on its current state
 
-`GameStateMachine` enables `InputRouter` on entering `PlayerTurn` and disables it on entering `Animating` or `GameOver`, so clicks during animations or after game-end are silently dropped.
+`GameStateMachine` enables `InputRouter` on entering `PlayerTurn` and disables it on entering `Animating`, `AIThinking`, or `GameOver`, so clicks during animations, AI turns, or after game-end are silently dropped.
 
 No special-casing for touch vs. mouse — Unity's Input System handles it.
 
@@ -233,6 +244,70 @@ TurnManager.EndTurn()
   → BeginTurn(nextPlayer)
 ```
 
+### AI System
+
+All AI players implement `IAIController`, which has a single async entry point:
+
+```csharp
+Task TakeTurn(GameContext context);
+```
+
+`TurnManager` calls this when the active player is non-human and awaits completion before calling `EndTurn()`. The game enters `AIThinking` state for the duration — input is locked and a "Thinking…" overlay is shown.
+
+#### WorldView pipeline (LlmAI)
+
+`LlmAI` processes units one at a time, re-serializing world state between decisions so the LLM sees intermediate board changes (e.g., a unit that already moved):
+
+```
+for each unacted unit:
+    prompt  = WorldStateSerializer.Serialize(gameContext, unit)
+    tools   = ActionEnumerator.GetToolDefs(unit)        // legal moves as typed tool defs
+    response = await llmClient.Complete(prompt, tools)
+    actions  = ActionParser.Parse(response)             // tool-call JSON → IGameAction[]
+    execute actions → enter Animating → await animation → return to AIThinking
+EndTurn()
+```
+
+#### Prompt format
+
+`WorldStateSerializer` produces a hybrid prompt — an ASCII map for spatial context followed by a structured stat block:
+
+```
+Turn 4 — Blue Moon (AI)
+MAP (12×10):  . plains  F forest  M mountain  C city  H HQ  * factory
+. . . . F F . . . C . .
+. I1 . . F . . . . . . .
+. . . . . . R2 . . . . .
+...
+
+UNITS:
+  [P1] Infantry  (3,1) HP:72  ammo:3  fuel:45  canAct:true
+  [P2] Recon     (6,2) HP:100 ammo:0  fuel:60  canAct:true   ← acting now
+
+PROPERTIES:
+  City  (9,0) owner:neutral
+  HQ    (11,9) owner:P1
+  HQ    (0,0)  owner:P2
+```
+
+#### Tool-call actions
+
+The LLM responds via tool use (not free text), eliminating parsing fragility. Defined tools:
+
+| Tool | Parameters |
+|------|-----------|
+| `move_unit` | `unit_id`, `destination: {x, y}` |
+| `attack_unit` | `unit_id`, `target_id` |
+| `capture_tile` | `unit_id` |
+| `wait_unit` | `unit_id` |
+| `end_turn` | — |
+
+`ActionEnumerator` pre-computes the legal destination set (via `Pathfinding`) and legal attack targets for the current unit, and passes these as enum constraints in the tool definitions so the LLM cannot select an illegal move.
+
+#### Providers
+
+`ILlmClient` abstracts the HTTP layer. `AnthropicClient` implements it against the Claude API. Swapping providers or models requires only a new `ILlmClient` implementation — no changes to `LlmAI` or the WorldView layer.
+
 ---
 
 ## Camera
@@ -257,7 +332,8 @@ TurnManager.EndTurn()
 
 ## Post-MVP Roadmap
 
-- AI opponent (greedy heuristic)
+- Heuristic AI opponent (greedy scorer via `HeuristicAI`)
+- LLM AI opponent (`LlmAI` + `AnthropicClient` already stubbed; plug in API key to enable)
 - Fog of war
 - More unit types: Artillery, APC, Battlecopter, Lander
 - CO system with day powers
