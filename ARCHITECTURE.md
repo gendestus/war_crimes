@@ -53,6 +53,7 @@ A turn-based strategy game built in Unity 2D, targeting desktop for MVP with tou
 2. **Pointer-first input** — all interaction is `position → tile → action`. No button-specific paths, so mouse and touch are identical.
 3. **Event bus for loose coupling** — systems communicate via a lightweight `GameEvents` static class rather than direct references.
 4. **State machine for game flow** — a `GameStateMachine` owns the current phase (PlayerTurn → SelectUnit → SelectTarget → Animate → EnemyTurn, etc.).
+5. **Modern resolution, not GBA-ported** — mechanics that existed solely to fit a 240×160 screen are removed. HP is a single 1–100 integer (no display-alias scale). Health bars are smooth fills with a numeric readout. UI panels use actual readable text rather than icon-only compression.
 
 ---
 
@@ -74,7 +75,7 @@ Assets/
 │   │   │   ├── Tile.cs              # Runtime tile: terrain type, unit ref, capture progress
 │   │   │   ├── TileData.cs          # ScriptableObject: terrain name, move costs, defense stars, sprite
 │   │   │   ├── MapLoader.cs         # Reads a MapData SO and populates the Tilemap + logical grid
-│   │   │   ├── MapData.cs           # ScriptableObject: 2D array of TileData refs + starting unit placements
+│   │   │   ├── MapData.cs           # ScriptableObject: flat TileData[] (row-major, width×height) + starting unit placements
 │   │   │   └── Pathfinding.cs       # BFS/Dijkstra movement range; returns reachable tiles + paths
 │   │   │
 │   │   ├── Units/
@@ -85,14 +86,14 @@ Assets/
 │   │   │
 │   │   ├── Combat/
 │   │   │   ├── CombatManager.cs     # Orchestrates an attack: resolves damage, triggers counter, checks death
-│   │   │   ├── DamageTable.cs       # ScriptableObject: attacker × defender → base damage %
+│   │   │   ├── DamageTable.cs       # ScriptableObject: flat float[] (row-major, unitTypeCount²); attacker × defender → base damage %
 │   │   │   └── CombatMath.cs        # Pure static: damage formula, terrain defense, HP rounding
 │   │   │
 │   │   ├── Capture/
 │   │   │   └── CaptureSystem.cs     # Handles capture-property action; checks win via HQ capture
 │   │   │
 │   │   ├── Input/
-│   │   │   ├── InputRouter.cs       # Listens to InputAction (pointer click/tap); converts to world pos → tile
+│   │   │   ├── InputRouter.cs       # Listens to InputAction (pointer click/tap); converts to world pos → tile; disabled by GameStateMachine during Animating and GameOver
 │   │   │   └── SelectionStateMachine.cs  # Idle → UnitSelected → MoveTarget → AttackTarget
 │   │   │
 │   │   ├── UI/
@@ -101,7 +102,7 @@ Assets/
 │   │   │   ├── UnitInfoPanel.cs     # HP, ammo, fuel display for hovered/selected unit
 │   │   │   ├── TileInfoPanel.cs     # Terrain name + defense stars
 │   │   │   ├── TurnBanner.cs        # "Player 1 Turn" overlay between turns
-│   │   │   └── HealthBar.cs         # Per-unit world-space HP display (1–10 star system)
+│   │   │   └── HealthBar.cs         # Per-unit world-space HP bar: smooth fill + numeric readout (1–100)
 │   │   │
 │   │   └── AI/                      # Post-MVP stub
 │   │       └── AIController.cs      # Interface; NullAI (hotseat) and SimpleAI (greedy) implementations
@@ -188,28 +189,30 @@ Uses a single `InputAction` of type `Value<Vector2>` (pointer position) plus a `
 2. Raise `GameEvents.OnTilePointed(gridPos)`
 3. `SelectionStateMachine` reacts based on its current state
 
+`GameStateMachine` enables `InputRouter` on entering `PlayerTurn` and disables it on entering `Animating` or `GameOver`, so clicks during animations or after game-end are silently dropped.
+
 No special-casing for touch vs. mouse — Unity's Input System handles it.
 
 ### Damage Formula
 
-Based on Advance Wars GBA rules (simplified):
+Based on Advance Wars GBA rules, adapted for base-100 HP:
 
 ```
-baseDamage  = DamageTable[attacker][defender]          // 0–120
-attackPower = baseDamage * (attackerHP / 10)
-defense     = terrainStars * 10 * (defenderHP / 10)
+baseDamage  = DamageTable[attacker][defender]            // 0–120 (base damage %)
+attackPower = baseDamage * (attackerHP / 100.0)          // attacker HP: 1–100
+defense     = terrainStars * 10 * (defenderHP / 100.0)   // defender HP: 1–100
 finalDamage = max(0, round(attackPower - defense))
 ```
 
-HP is stored internally as 1–100 but displayed as 1–10 (ceil(hp/10)). A unit at 1 HP still has display HP 1.
+HP is a single 1–100 integer. No display alias. A full-HP attacker applies 100% of baseDamage; a 1-HP attacker applies 1%.
 
 ### Capture System
 
 Each turn a foot-unit ends its turn on a capturable tile:
 
 ```
-captureProgress += displayHP   // 0–10 per turn
-if captureProgress >= 20:
+captureProgress += hp          // 1–100 per turn (full-HP unit contributes 100)
+if captureProgress >= 200:     // 2 full-HP turns to capture; weakened units take longer
     tile.owner = capturingPlayer
 ```
 
