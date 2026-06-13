@@ -49,6 +49,19 @@ namespace WarCrimes
             Fuel = data.maxFuel;
         }
 
+        public void SetVisualState(UnitVisualState state)
+        {
+            if (sr == null) return;
+            sr.sprite = state switch
+            {
+                UnitVisualState.Move    => data.spriteMove    != null ? data.spriteMove    : data.spriteIdle,
+                UnitVisualState.MoveAlt => data.spriteMoveAlt != null ? data.spriteMoveAlt : data.spriteMove,
+                UnitVisualState.Attack  => data.spriteAttack  != null ? data.spriteAttack  : data.spriteIdle,
+                UnitVisualState.Hit     => data.spriteHit     != null ? data.spriteHit     : data.spriteIdle,
+                _                       => data.spriteIdle,
+            };
+        }
+
         void UpdateActedVisual()
         {
             if (sr == null) return;

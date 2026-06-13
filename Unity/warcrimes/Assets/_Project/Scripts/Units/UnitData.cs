@@ -13,6 +13,10 @@ namespace WarCrimes
         public int maxAmmo = 9;
         public int maxFuel = 99;
         public bool canCapture;
-        public Sprite idleSprite;
+        public Sprite spriteIdle;
+        public Sprite spriteMove;
+        public Sprite spriteMoveAlt;
+        public Sprite spriteAttack;
+        public Sprite spriteHit;
     }
 }

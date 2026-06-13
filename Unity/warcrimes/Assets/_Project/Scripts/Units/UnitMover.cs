@@ -21,11 +21,17 @@ namespace WarCrimes
 
         IEnumerator MoveCoroutine(Unit unit, List<Vector2Int> path, Action onComplete)
         {
+            unit.SetVisualState(UnitVisualState.Move);
+
             var startTile = GridManager.Instance.GetTile(unit.GridPosition);
             if (startTile != null) startTile.Occupant = null;
 
+            bool alt = false;
             foreach (var step in path)
             {
+                unit.SetVisualState(alt ? UnitVisualState.MoveAlt : UnitVisualState.Move);
+                alt = !alt;
+
                 var target = GridManager.Instance.GridToWorld(step);
                 while (Vector3.Distance(unit.transform.position, target) > 0.01f)
                 {
@@ -41,6 +47,7 @@ namespace WarCrimes
             var destTile = GridManager.Instance.GetTile(dest);
             if (destTile != null) destTile.Occupant = unit;
 
+            unit.SetVisualState(UnitVisualState.Idle);
             onComplete?.Invoke();
         }
     }
